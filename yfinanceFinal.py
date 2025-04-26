@@ -1,6 +1,5 @@
 import yfinance as yf
 import requests
-from bs4 import BeautifulSoup
 import os
 import streamlit as st
 import pandas as pd
@@ -9,27 +8,41 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 from datetime import datetime, timedelta
+from openai import OpenAI
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph
 from typing import TypedDict, Sequence
+from bs4 import BeautifulSoup
+from nselib import capital_market
+from nselib import derivatives
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, BatchNormalization
+from tensorflow.keras.callbacks import EarlyStopping
 
 # API Configuration
 BASE_URL = 'https://financialmodelingprep.com/api'
 API_VERSION = 'v3'
 API_KEY = 'KMnGVJA9NCTKL5SVpY4BWL54EcGXNiQ1'
 
-# LangSmith and OpenAI setup
+# LangSmith and Cohere setup
 os.environ["LANGSMITH_TRACING"] = "true"
-os.environ["LANGSMITH_API_KEY"] = "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"
-os.environ["OPENAI_API_KEY"] = "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"
-os.environ["OPENAI_API_BASE"] = "https://openrouter.ai/api/v1"
+os.environ["LANGSMITH_API_KEY"] = "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"
 
-# Initialize LangChain model
-model = ChatOpenAI(model="gpt-3.5-turbo", openai_api_key=os.environ["OPENAI_API_KEY"])
+os.environ["GROK_API_KEY"] = "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"  # Replace with your Grok API key
+os.environ["GROK_API_BASE"] = "https://api.groq.com/openai/v1"  # Replace with the actual Grok API endpoint
 
+# Initialize Grok model (change the model name according to Grok's offerings)
+model = ChatOpenAI(
+    model="meta-llama/llama-4-scout-17b-16e-instruct",  # Or a different Grok model name
+    openai_api_key=os.environ["GROK_API_KEY"],  # Using Grok API key here
+    openai_api_base=os.environ["GROK_API_BASE"],  # Grok API base URL
+)
 # Define State
 class State(TypedDict):
     messages: Sequence[BaseMessage]
@@ -42,6 +55,7 @@ You are a financial risk assessment assistant. Provide investment advice based o
 When users request visualizations or when visual analysis would be helpful, acknowledge that you'll 
 generate appropriate charts and explain what they'll show. The system will automatically create 
 visualizations based on the query. Provide brief analysis alongside any visualization.
+For price predictions, acknowledge that you'll generate LSTM-based forecasts.
 """
 
 # LangGraph setup
@@ -81,6 +95,10 @@ def extract_tickers(query):
     all_tickers = list(set(standard_tickers + dollar_tickers))
     common_words = ["I", "A", "FOR", "IN", "ON", "AT", "BY", "AND", "OR", "THE", "TO"]
     return [ticker for ticker in all_tickers if ticker not in common_words]
+
+def should_predict(query):
+    keywords = ["predict", "forecast", "future", "next month", "price after", "expected price"]
+    return any(word in query.lower() for word in keywords)
 
 def should_visualize(query):
     viz_keywords = [
@@ -131,6 +149,60 @@ def get_visualization_type(query):
     elif any(term in query for term in ["volatility", "risk"]):
         return "volatility"
     return "line"  # Default
+
+# LSTM Prediction Functions
+def prepare_stock_data(data, sequence_length=60):
+    data.fillna(method='ffill', inplace=True)
+    scaler = MinMaxScaler()
+    data_scaled = scaler.fit_transform(data['Close'].values.reshape(-1,1))
+
+    X, Y = [], []
+    for i in range(sequence_length, len(data_scaled)):
+        X.append(data_scaled[i-sequence_length:i, 0])
+        Y.append(data_scaled[i, 0])
+
+    X, Y = np.array(X), np.array(Y)
+    X = X.reshape((X.shape[0], X.shape[1], 1))
+
+    train_size = int(len(X) * 0.8)
+    return X[:train_size], X[train_size:], Y[:train_size], Y[train_size:], scaler
+
+def create_lstm_model(input_shape):
+    model = Sequential([
+        LSTM(50, return_sequences=True, input_shape=input_shape),
+        Dropout(0.2),
+        LSTM(50, return_sequences=False),
+        Dropout(0.2),
+        BatchNormalization(),
+        Dense(25),
+        Dense(1)
+    ])
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    return model
+
+def predict_future_prices(ticker, days=30, sequence_length=60):
+    stock = yf.Ticker(ticker)
+    data = stock.history(period="5y")
+    if data.empty:
+        return None, None
+    X_train, X_test, Y_train, Y_test, scaler = prepare_stock_data(data, sequence_length)
+    model = create_lstm_model((X_train.shape[1], X_train.shape[2]))
+
+    early_stop = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+    model.fit(X_train, Y_train, epochs=15, batch_size=32, validation_split=0.2, verbose=0, callbacks=[early_stop])
+
+    closing_prices = data['Close'].values
+    scaled_data = scaler.transform(closing_prices.reshape(-1,1))
+    current_batch = scaled_data[-sequence_length:].reshape(1, sequence_length, 1)
+
+    predictions = []
+    for _ in range(days):
+        pred = model.predict(current_batch, verbose=0)
+        predictions.append(scaler.inverse_transform(pred)[0,0])
+        current_batch = np.append(current_batch[:,1:,:], pred.reshape(1,1,1), axis=1)
+
+    future_dates = pd.date_range(start=data.index[-1] + pd.Timedelta(days=1), periods=days)
+    return future_dates, predictions
 
 # Create a ChartData class to store chart information
 class ChartData:
@@ -421,8 +493,29 @@ if st.button("Submit"):
     # Initialize charts for this message
     st.session_state.message_charts[msg_index] = []
     
+    # Handle prediction requests
+    if should_predict(query) and tickers:
+        for ticker in tickers:
+            with st.spinner(f"Generating price predictions for {ticker}..."):
+                dates, prices = predict_future_prices(ticker)
+                if dates is not None:
+                    fig, ax = plt.subplots(figsize=(12,6))
+                    ax.plot(dates, prices, label='Predicted Price', color='blue')
+                    ax.set_title(f"{ticker} 30-Day Price Prediction", fontsize=16)
+                    ax.set_xlabel("Date", fontsize=12)
+                    ax.set_ylabel("Price ($)", fontsize=12)
+                    ax.grid(True, alpha=0.3)
+                    ax.legend()
+                    plt.tight_layout()
+                    
+                    chart_data = ChartData(query, fig, None, "prediction", ticker)
+                    st.session_state.message_charts[msg_index].append(chart_data)
+                    
+                    pred_df = pd.DataFrame({"Date": dates, "Predicted Price": prices})
+                    bot_reply += f"\n\nPredicted prices for {ticker}:\n{pred_df.to_string(index=False)}"
+    
     # Create visualizations based on query
-    if should_visualize(query) and tickers:
+    elif should_visualize(query) and tickers:
         period = extract_period_from_query(query)
         viz_type = get_visualization_type(query)
         
@@ -480,7 +573,7 @@ if st.button("Submit"):
                 change_percent = (change_value / previous_price) * 100
                 
                 # Add stock info to response
-                stock_info = f"📈 **{ticker}**: ${current_price:.2f} ({change_percent:.2f}%)"
+                stock_info = f"📈 *{ticker}*: ${current_price:.2f} ({change_percent:.2f}%)"
                 bot_reply = stock_info + "\n\n" + bot_reply
         except:
             pass
@@ -490,7 +583,7 @@ if st.button("Submit"):
 # Display conversation with charts inline
 for i, msg in enumerate(st.session_state.history):
     if isinstance(msg, HumanMessage):
-        st.markdown(f"👤 **You:** {msg.content}")
+        st.markdown(f"👤 *You:* {msg.content}")
         
         # Display charts right after the query they're related to
         if i in st.session_state.message_charts and st.session_state.message_charts[i]:
@@ -503,7 +596,7 @@ for i, msg in enumerate(st.session_state.history):
                         st.table(chart.summary)
     
     elif isinstance(msg, AIMessage):
-        st.markdown(f"🤖 **AI:** {msg.content}")
+        st.markdown(f"🤖 *AI:* {msg.content}")
 
 # Add option to clear all charts
 if st.sidebar.button("Clear All Charts"):
@@ -585,11 +678,18 @@ news = soup.find(class_='Yfwt5').text
 about = soup.find(class_='bLLb2d').text
 
 # Create DataFrame for Google Finance data
-dict1 = {'Price': price,
-         'Previous Price': previous_close,
-         'Revenue': revenue,
-         'News': news,
-         'About': about}
+# Calculate percentage change
+percent_change = ((price - previous_close) / previous_close) * 100
+
+# Create DataFrame for Google Finance data
+dict1 = {
+    'Price': price,
+    'Previous Price': previous_close,
+    'Revenue': revenue,
+    'News': news,
+    'About': about,
+    '% Change': f"{percent_change:.2f}%"  # Format to 2 decimal places
+}
 
 df_google_finance = pd.DataFrame(dict1, index=['Extracted Data']).T
 
