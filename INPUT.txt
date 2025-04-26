@@ -1,0 +1,11 @@
+I'm 45 years old, earning $120,000 annually, and I prefer low-risk investments.
+You: I’m 28 years old, have a stable income of $70,000, and I’m open to moderate-risk investments. Should I buy TESLA
+Should I buy cryptocurrency like Bitcoin? I’m 28 years old, have a stable income of $70,000, and I’m open to moderate-risk investments.
+Is it a good idea to invest in mutual funds? I’m 50 years old, earn $110,000 annually, and prefer low to moderate-risk investments.
+How do I start investing with $5,000?
+Show me AAPL stock trends for the past month
+Compare TSLA, MSFT, and GOOGL performance over the last year
+What's the volatility of AMZN stock recently?
+Display NVDA candlestick chart for this quarter
+What is the correlation between the daily returns of the selected stocks over the last month?
+
