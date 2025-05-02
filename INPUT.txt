@@ -8,4 +8,4 @@ Compare TSLA, MSFT, and GOOGL performance over the last year
 What's the volatility of AMZN stock recently?
 Display NVDA candlestick chart for this quarter
 What is the correlation between the daily returns of the selected stocks over the last month?
-
+What is the short-term outlook for AAPL over the next week?
